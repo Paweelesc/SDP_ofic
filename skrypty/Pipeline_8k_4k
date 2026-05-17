@@ -1,0 +1,380 @@
+"""
+Dodanie auralizacji 8 kHz i 4 kHz do pipeline'u.
+Robi WSZYSTKO: auralizacja → normalizacja LUFS → obliczenie LSD/ILD → zapis CSV.
+"""
+
+import os
+import csv
+import numpy as np
+import soundfile as sf
+from scipy.signal import fftconvolve, resample_poly
+from math import gcd
+
+try:
+    import pyloudnorm as pyln
+except ImportError:
+    print("pip install pyloudnorm")
+    exit(1)
+
+# =====================================================
+# ŚCIEŻKI
+# =====================================================
+
+PRACA = r"C:\Users\Lenovo\Desktop\Praca_Inżynierska"
+ANECHOIC_DIR = os.path.join(PRACA, "Nagrania_Anechoiczne", "komora_bezechowa")
+IR_48K_DIR = os.path.join(PRACA, "ImpulseResponseoffic")
+IR_8K_DIR = os.path.join(PRACA, "Impulse response 8khz")
+IR_4K_DIR = os.path.join(PRACA, "Impulse response 4khz")
+
+AUDIO_DIR = r"C:\Users\Lenovo\Desktop\Magisterka\audio"
+OUTPUT_CSV = r"C:\Users\Lenovo\Desktop\Magisterka\wyniki_LSD_ILD_8k4k.csv"
+
+TARGET_FS = 48000
+TARGET_LUFS = -23.0
+PEAK_LIMIT = 10 ** (-1.0 / 20)  # -1 dBFS
+
+# =====================================================
+# 10 TESTÓW
+# =====================================================
+
+TASKS = [
+    {"id": 1,  "name": "gitara_klasyczna_korytarz_wprost",       "label": "Gitara klasyczna — Korytarz ZEA — Na wprost",    "anechoic": "nagranie_komora_gitara_klasyczna.wav",   "ir": "Kor  S1R1A0 wprost"},
+    {"id": 2,  "name": "gitara_klasyczna_sala123_praweucho",     "label": "Gitara klasyczna — Sala 123 — Prawe ucho",       "anechoic": "nagranie_komora_gitara_klasyczna.wav",   "ir": "S123  S1R2A0 praweucho"},
+    {"id": 3,  "name": "kontrabas_palce_korytarz_wprost",        "label": "Kontrabas palcami — Korytarz ZEA — Na wprost",   "anechoic": "nagranie_komora_kontrabas_palce.wav",    "ir": "Kor  S1R1A0 wprost"},
+    {"id": 4,  "name": "kontrabas_palce_studio_wprost",          "label": "Kontrabas palcami — Studio — Na wprost",         "anechoic": "nagranie_komora_kontrabas_palce.wav",    "ir": "Studio  S1R1A0 wprost"},
+    {"id": 5,  "name": "kontrabas_smyczek_studio_leweucho",      "label": "Kontrabas smyczkiem — Studio — Lewe ucho",       "anechoic": "nagranie_komora_kontrabas_smyczek.wav",  "ir": "Studio  S1R3A0 leweucho"},
+    {"id": 6,  "name": "wiolonczela_korytarz_wprost",            "label": "Wiolonczela — Korytarz ZEA — Na wprost",         "anechoic": "nagranie_komora_wiolonczela.wav",        "ir": "Kor  S1R1A0 wprost"},
+    {"id": 7,  "name": "wiolonczela_sala123_daleko",             "label": "Wiolonczela — Sala 123 — Oddalone",              "anechoic": "nagranie_komora_wiolonczela.wav",        "ir": "S123  S1R5A0 daleko"},
+    {"id": 8,  "name": "flet_studio_leweucho",                   "label": "Flet — Studio — Lewe ucho",                     "anechoic": "nagranie_komora_flet.wav",               "ir": "Studio  S1R3A0 leweucho"},
+    {"id": 9,  "name": "saksofon_studio_leweucho",               "label": "Saksofon — Studio — Lewe ucho",                 "anechoic": "nagranie_komora_saksofon.wav",           "ir": "Studio  S1R3A0 leweucho"},
+    {"id": 10, "name": "akordeon_korytarz_daleko",               "label": "Akordeon — Korytarz ZEA — Oddalone",             "anechoic": "nagranie_komora_akordeon.wav",           "ir": "Kor  S1R3A0 daleko"},
+]
+
+NEW_VARIANTS = [
+    {"key": "aur8",  "fs_label": "8 kHz",  "ir_dir": IR_8K_DIR,  "ir_suffix": "8khz",  "folder": "auraliz_8",  "file_suffix": "_aur8.wav",  "label": "Auralizacja 8 kHz"},
+    {"key": "aur4",  "fs_label": "4 kHz",  "ir_dir": IR_4K_DIR,  "ir_suffix": "4khz",  "folder": "auraliz_4",  "file_suffix": "_aur4.wav",  "label": "Auralizacja 4 kHz"},
+]
+
+OCTAVE_BANDS = [
+    (63, 125), (125, 250), (250, 500), (500, 1000),
+    (1000, 2000), (2000, 4000), (4000, 8000),
+    (8000, 16000), (16000, 24000),
+]
+
+# =====================================================
+# FUNKCJE
+# =====================================================
+
+def resample_to(data, orig_fs, target_fs):
+    if orig_fs == target_fs:
+        return data
+    common = gcd(orig_fs, target_fs)
+    up = target_fs // common
+    down = orig_fs // common
+    if data.ndim == 1:
+        return resample_poly(data, up, down)
+    else:
+        return resample_poly(data, up, down, axis=0)
+
+def load_and_resample(filepath, target_fs):
+    data, sr = sf.read(filepath)
+    if sr != target_fs:
+        data = resample_to(data, sr, target_fs)
+    return data
+
+def normalize_signal(y):
+    peak = np.max(np.abs(y))
+    if peak > 0:
+        y = y / peak * 0.9
+    return y
+
+def normalize_lufs(data, sr):
+    meter = pyln.Meter(sr)
+    lufs = meter.integrated_loudness(data)
+    if np.isinf(lufs):
+        return data
+    norm = pyln.normalize.loudness(data, lufs, TARGET_LUFS)
+    pk = np.max(np.abs(norm))
+    if pk > PEAK_LIMIT:
+        norm = norm * (PEAK_LIMIT / pk)
+    return norm
+
+def auralize_stereo(x_mono, ir):
+    if ir.ndim == 1:
+        y = fftconvolve(x_mono, ir, mode="full")
+        return normalize_signal(y)
+    y_L = fftconvolve(x_mono, ir[:, 0], mode="full")
+    y_R = fftconvolve(x_mono, ir[:, 1], mode="full")
+    y = np.column_stack((y_L, y_R))
+    return normalize_signal(y)
+
+def compute_lsd(ref, deg, sr, n_fft=4096, hop=2048):
+    min_len = min(len(ref), len(deg))
+    ref, deg = ref[:min_len], deg[:min_len]
+    window = np.hanning(n_fft)
+    n_frames = (len(ref) - n_fft) // hop + 1
+    eps = 1e-10
+    lsd_frames = []
+    for i in range(n_frames):
+        fr = ref[i*hop:i*hop+n_fft] * window
+        fd = deg[i*hop:i*hop+n_fft] * window
+        pr = np.abs(np.fft.rfft(fr))**2
+        pd = np.abs(np.fft.rfft(fd))**2
+        lr = 10*np.log10(pr+eps)
+        ld = 10*np.log10(pd+eps)
+        lsd_frames.append(np.sqrt(np.mean((lr-ld)**2)))
+    return float(np.mean(lsd_frames))
+
+def compute_lsd_per_band(ref, deg, sr, bands, n_fft=4096, hop=2048):
+    min_len = min(len(ref), len(deg))
+    ref, deg = ref[:min_len], deg[:min_len]
+    window = np.hanning(n_fft)
+    n_frames = (len(ref) - n_fft) // hop + 1
+    freqs = np.fft.rfftfreq(n_fft, 1.0/sr)
+    eps = 1e-10
+    results = {}
+    for lo, hi in bands:
+        mask = (freqs >= lo) & (freqs < hi)
+        if not np.any(mask):
+            results[(lo,hi)] = np.nan
+            continue
+        vals = []
+        for i in range(n_frames):
+            fr = ref[i*hop:i*hop+n_fft] * window
+            fd = deg[i*hop:i*hop+n_fft] * window
+            pr = np.abs(np.fft.rfft(fr))**2
+            pd = np.abs(np.fft.rfft(fd))**2
+            lr = 10*np.log10(pr[mask]+eps)
+            ld = 10*np.log10(pd[mask]+eps)
+            vals.append(np.sqrt(np.mean((lr-ld)**2)))
+        results[(lo,hi)] = float(np.mean(vals))
+    return results
+
+def compute_ild_error(ref_L, ref_R, deg_L, deg_R, sr, bands):
+    min_len = min(len(ref_L), len(ref_R), len(deg_L), len(deg_R))
+    ref_L, ref_R = ref_L[:min_len], ref_R[:min_len]
+    deg_L, deg_R = deg_L[:min_len], deg_R[:min_len]
+    freqs = np.fft.rfftfreq(min_len, 1.0/sr)
+    eps = 1e-20
+    fft_rL = np.abs(np.fft.rfft(ref_L))**2
+    fft_rR = np.abs(np.fft.rfft(ref_R))**2
+    fft_dL = np.abs(np.fft.rfft(deg_L))**2
+    fft_dR = np.abs(np.fft.rfft(deg_R))**2
+    errors = {}
+    for lo, hi in bands:
+        mask = (freqs >= lo) & (freqs < hi)
+        if not np.any(mask):
+            errors[(lo,hi)] = 0.0
+            continue
+        ild_ref = 10*np.log10((np.sum(fft_rL[mask])+eps)/(np.sum(fft_rR[mask])+eps))
+        ild_deg = 10*np.log10((np.sum(fft_dL[mask])+eps)/(np.sum(fft_dR[mask])+eps))
+        errors[(lo,hi)] = abs(ild_ref - ild_deg)
+    return float(np.mean(list(errors.values()))), errors
+
+# =====================================================
+# KROK 1: AURALIZACJA 8 kHz i 4 kHz
+# =====================================================
+
+print("=" * 70)
+print("KROK 1: AURALIZACJA 8 kHz i 4 kHz")
+print("=" * 70)
+print()
+
+# Cache bezechowych
+anechoic_cache = {}
+needed = set(t["anechoic"] for t in TASKS)
+for filename in needed:
+    filepath = os.path.join(ANECHOIC_DIR, filename)
+    data, sr = sf.read(filepath)
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+    if sr != TARGET_FS:
+        data = resample_to(data, sr, TARGET_FS)
+    anechoic_cache[filename] = data
+    print(f"  Bezechowe: {filename} ({sr} Hz -> {TARGET_FS} Hz)")
+
+print()
+
+for var in NEW_VARIANTS:
+    out_dir = os.path.join(AUDIO_DIR, var["folder"])
+    os.makedirs(out_dir, exist_ok=True)
+
+    print(f"--- Auralizacja {var['fs_label']} ---")
+
+    for task in TASKS:
+        x = anechoic_cache[task["anechoic"]]
+        ir_filename = f"{task['ir']} {var['ir_suffix']}.wav"
+        ir_path = os.path.join(var["ir_dir"], ir_filename)
+
+        if not os.path.exists(ir_path):
+            print(f"  BRAK IR: {ir_path}")
+            continue
+
+        ir = load_and_resample(ir_path, TARGET_FS)
+        common = gcd(sf.info(ir_path).samplerate, TARGET_FS)
+        up = TARGET_FS // common
+        down = sf.info(ir_path).samplerate // common
+        
+        y = auralize_stereo(x, ir)
+
+        base = f"test{task['id']:02d}_{task['name']}"
+        dst = os.path.join(out_dir, base + var["file_suffix"])
+        sf.write(dst, y, TARGET_FS, subtype="FLOAT")
+        print(f"  Test {task['id']:>2}: OK (IR resample up={up}, down={down})")
+
+    print()
+
+# =====================================================
+# KROK 2: NORMALIZACJA LUFS
+# =====================================================
+
+print("=" * 70)
+print("KROK 2: NORMALIZACJA LUFS (-23 LUFS)")
+print("=" * 70)
+print()
+
+for var in NEW_VARIANTS:
+    folder = os.path.join(AUDIO_DIR, var["folder"])
+    wavs = [f for f in os.listdir(folder) if f.endswith('.wav')]
+    print(f"  {var['folder']}: {len(wavs)} plików...", end="", flush=True)
+    for f in wavs:
+        path = os.path.join(folder, f)
+        data, sr = sf.read(path)
+        data = normalize_lufs(data, sr)
+        sf.write(path, data, sr, subtype="FLOAT")
+    print(" znormalizowane")
+
+print()
+
+# =====================================================
+# KROK 3: LSD + ILD
+# =====================================================
+
+print("=" * 70)
+print("KROK 3: OBLICZANIE LSD + ILD ERROR")
+print("=" * 70)
+print()
+
+all_results = []
+
+for task in TASKS:
+    print(f"--- Test {task['id']:>2}: {task['label']} ---")
+
+    base = f"test{task['id']:02d}_{task['name']}"
+    ref_path = os.path.join(AUDIO_DIR, "ref", base + "_ref.wav")
+
+    if not os.path.exists(ref_path):
+        print(f"  BRAK REF")
+        continue
+
+    ref_data, sr = sf.read(ref_path)
+    ref_L = ref_data[:, 0] if ref_data.ndim > 1 else ref_data
+    ref_R = ref_data[:, 1] if ref_data.ndim > 1 else ref_data
+
+    for var in NEW_VARIANTS:
+        deg_path = os.path.join(AUDIO_DIR, var["folder"], base + var["file_suffix"])
+
+        if not os.path.exists(deg_path):
+            print(f"  {var['key']:>5}: BRAK")
+            continue
+
+        deg_data, _ = sf.read(deg_path)
+        deg_L = deg_data[:, 0] if deg_data.ndim > 1 else deg_data
+        deg_R = deg_data[:, 1] if deg_data.ndim > 1 else deg_data
+
+        lsd_L = compute_lsd(ref_L, deg_L, sr)
+        lsd_R = compute_lsd(ref_R, deg_R, sr)
+        lsd_avg = (lsd_L + lsd_R) / 2
+
+        lsd_bands_L = compute_lsd_per_band(ref_L, deg_L, sr, OCTAVE_BANDS)
+        lsd_bands_R = compute_lsd_per_band(ref_R, deg_R, sr, OCTAVE_BANDS)
+
+        ild_err_avg, ild_errors = compute_ild_error(ref_L, ref_R, deg_L, deg_R, sr, OCTAVE_BANDS)
+
+        print(f"  {var['key']:>5}: LSD_avg={lsd_avg:.2f} dB  ILD_err={ild_err_avg:.2f} dB")
+
+        # Zbieramy do tabelki w tym samym formacie jak oryginał
+        instr = task['label'].split('—')[0].strip()
+        room = task['label'].split('—')[1].strip() if '—' in task['label'] else ''
+        pos = task['label'].split('—')[2].strip() if task['label'].count('—') >= 2 else ''
+
+        row = {
+            "task_id": task["id"],
+            "instrument": instr,
+            "pomieszczenie": room,
+            "pozycja": pos,
+            "typ": var["label"],
+            "typ_kod": var["key"],
+            "LSD_L": round(lsd_L, 3),
+            "LSD_R": round(lsd_R, 3),
+            "LSD_avg": round(lsd_avg, 3),
+            "ILD_error_avg": round(ild_err_avg, 3),
+        }
+
+        for band in OCTAVE_BANDS:
+            lo, hi = band
+            lsd_b = (lsd_bands_L[band] + lsd_bands_R[band]) / 2
+            row[f"LSD_{lo}-{hi}Hz"] = round(lsd_b, 3)
+
+        for band in OCTAVE_BANDS:
+            lo, hi = band
+            row[f"ILD_err_{lo}-{hi}Hz"] = round(ild_errors[band], 3)
+
+        all_results.append(row)
+
+    print()
+
+# =====================================================
+# ZAPIS CSV
+# =====================================================
+
+if all_results:
+    fieldnames = list(all_results[0].keys())
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(all_results)
+
+print("=" * 70)
+print("PODSUMOWANIE")
+print("=" * 70)
+print()
+
+by_type = {}
+for row in all_results:
+    key = row["typ_kod"]
+    if key not in by_type:
+        by_type[key] = {"lsd": [], "ild": []}
+    by_type[key]["lsd"].append(row["LSD_avg"])
+    by_type[key]["ild"].append(row["ILD_error_avg"])
+
+print(f"{'Typ':<25} {'Śr. LSD (dB)':>14} {'Śr. ILD err (dB)':>18}")
+print("-" * 60)
+for key in ["aur8", "aur4"]:
+    if key in by_type:
+        lsd_avg = np.mean(by_type[key]["lsd"])
+        ild_avg = np.mean(by_type[key]["ild"])
+        label = [v["label"] for v in NEW_VARIANTS if v["key"] == key][0]
+        print(f"{label:<25} {lsd_avg:>14.2f} {ild_avg:>18.2f}")
+
+print()
+print(f"Wyniki zapisane: {OUTPUT_CSV}")
+print()
+print("KOMPLETNA TABELA (razem z istniejącymi wynikami):")
+print()
+print(f"{'Typ':<25} {'Śr. LSD (dB)':>14} {'Śr. ILD err (dB)':>18}")
+print("-" * 60)
+print(f"{'Auralizacja 48 kHz':<25} {'30.17':>14} {'1.87':>18}")
+print(f"{'Auralizacja 24 kHz':<25} {'38.07':>14} {'1.71':>18}")
+print(f"{'Auralizacja 12 kHz':<25} {'45.38':>14} {'1.83':>18}")
+for key in ["aur8", "aur4"]:
+    if key in by_type:
+        lsd_avg = np.mean(by_type[key]["lsd"])
+        ild_avg = np.mean(by_type[key]["ild"])
+        label = [v["label"] for v in NEW_VARIANTS if v["key"] == key][0]
+        print(f"{label:<25} {lsd_avg:>14.2f} {ild_avg:>18.2f}")
+print(f"{'Kotwica (mono)':<25} {'30.96':>14} {'2.33':>18}")
+print()
+print("Pliki audio w:")
+print(f"  {os.path.join(AUDIO_DIR, 'auraliz_8')}")
+print(f"  {os.path.join(AUDIO_DIR, 'auraliz_4')}")

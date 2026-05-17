@@ -1,0 +1,209 @@
+"""
+PEAQ z referencją = auralizacja 48 kHz.
+Porównuje: aur48 vs aur48 (sanity), aur24, aur12, aur8, aur4.
+Mierzy WYŁĄCZNIE degradację spowodowaną obniżeniem pasma IR.
+"""
+
+import os
+import csv
+import tempfile
+import numpy as np
+import soundfile as sf
+from aquatk.metrics.PEAQ.peaq_basic import process_audio_files
+
+# =====================================================
+# ŚCIEŻKI
+# =====================================================
+
+AUDIO_DIR = r"C:\Users\Lenovo\Desktop\Magisterka\audio"
+OUTPUT_CSV = r"C:\Users\Lenovo\Desktop\Magisterka\wyniki_PEAQ_ref48.csv"
+
+# =====================================================
+# 10 TESTÓW
+# =====================================================
+
+TASKS = [
+    {"id": 1,  "name": "Gitara klasyczna",    "room": "Korytarz ZEA", "pos": "Na wprost",  "base": "test01_gitara_klasyczna_korytarz_wprost"},
+    {"id": 2,  "name": "Gitara klasyczna",    "room": "Sala 123",     "pos": "Prawe ucho", "base": "test02_gitara_klasyczna_sala123_praweucho"},
+    {"id": 3,  "name": "Kontrabas palcami",   "room": "Korytarz ZEA", "pos": "Na wprost",  "base": "test03_kontrabas_palce_korytarz_wprost"},
+    {"id": 4,  "name": "Kontrabas palcami",   "room": "Studio",       "pos": "Na wprost",  "base": "test04_kontrabas_palce_studio_wprost"},
+    {"id": 5,  "name": "Kontrabas smyczkiem", "room": "Studio",       "pos": "Lewe ucho",  "base": "test05_kontrabas_smyczek_studio_leweucho"},
+    {"id": 6,  "name": "Wiolonczela",         "room": "Korytarz ZEA", "pos": "Na wprost",  "base": "test06_wiolonczela_korytarz_wprost"},
+    {"id": 7,  "name": "Wiolonczela",         "room": "Sala 123",     "pos": "Oddalone",   "base": "test07_wiolonczela_sala123_daleko"},
+    {"id": 8,  "name": "Flet",                "room": "Studio",       "pos": "Lewe ucho",  "base": "test08_flet_studio_leweucho"},
+    {"id": 9,  "name": "Saksofon",            "room": "Studio",       "pos": "Lewe ucho",  "base": "test09_saksofon_studio_leweucho"},
+    {"id": 10, "name": "Akordeon",             "room": "Korytarz ZEA", "pos": "Oddalone",   "base": "test10_akordeon_korytarz_daleko"},
+]
+
+# Referencja = aur48, porównanie z resztą
+VARIANTS = [
+    {"key": "aur48_sanity", "folder": "auraliz_48", "suffix": "_aur48.wav",  "label": "aur48 vs aur48 (sanity)"},
+    {"key": "aur24",        "folder": "auraliz_24", "suffix": "_aur24.wav",  "label": "Auralizacja 24 kHz"},
+    {"key": "aur12",        "folder": "auraliz_12", "suffix": "_aur12.wav",  "label": "Auralizacja 12 kHz"},
+    {"key": "aur8",         "folder": "auraliz_8",  "suffix": "_aur8.wav",   "label": "Auralizacja 8 kHz"},
+    {"key": "aur4",         "folder": "auraliz_4",  "suffix": "_aur4.wav",   "label": "Auralizacja 4 kHz"},
+]
+
+
+def to_16bit_mono_tempfile(src_path):
+    data, sr = sf.read(src_path)
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+    peak = np.max(np.abs(data))
+    if peak > 1.0:
+        data = data / peak
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    sf.write(tmp_path, data, sr, subtype="PCM_16")
+    return tmp_path
+
+
+def parse_peaq_result(result):
+    if isinstance(result, dict):
+        odg = result.get("ODG", result.get("odg", None))
+        di = result.get("DI", result.get("di", result.get("Distortion Index", None)))
+        if odg is not None:
+            return float(di) if di is not None else None, float(odg)
+        vals = list(result.values())
+        if len(vals) >= 2:
+            return float(vals[0]), float(vals[1])
+        return None, float(vals[0])
+    if isinstance(result, (list, tuple)):
+        flat = []
+        for item in result:
+            if isinstance(item, (list, tuple)):
+                flat.extend(item)
+            elif isinstance(item, dict):
+                flat.extend(item.values())
+            else:
+                flat.append(item)
+        if len(flat) >= 2:
+            return float(flat[0]), float(flat[1])
+        return None, float(flat[0])
+    return None, float(result)
+
+
+# =====================================================
+# GŁÓWNA PĘTLA
+# =====================================================
+
+print("=" * 75)
+print("PEAQ — REFERENCJA = AURALIZACJA 48 kHz")
+print("Mierzy wyłącznie degradację pasma IR")
+print("=" * 75)
+print()
+
+all_results = []
+tmp_files = []
+
+for task in TASKS:
+    print(f"--- Test {task['id']:>2}: {task['name']} — {task['room']} — {task['pos']} ---")
+
+    # Referencja = auralizacja 48 kHz
+    ref_path = os.path.join(AUDIO_DIR, "auraliz_48", task["base"] + "_aur48.wav")
+    if not os.path.exists(ref_path):
+        print(f"  BRAK REFERENCJI 48k: {ref_path}")
+        continue
+
+    ref_tmp = to_16bit_mono_tempfile(ref_path)
+    tmp_files.append(ref_tmp)
+
+    for var in VARIANTS:
+        deg_path = os.path.join(AUDIO_DIR, var["folder"], task["base"] + var["suffix"])
+        if not os.path.exists(deg_path):
+            print(f"  {var['key']:>14}: BRAK PLIKU")
+            continue
+
+        deg_tmp = to_16bit_mono_tempfile(deg_path)
+        tmp_files.append(deg_tmp)
+
+        print(f"  {var['key']:>14}: obliczam...", end="", flush=True)
+
+        try:
+            result = process_audio_files(ref_tmp, deg_tmp)
+            di, odg = parse_peaq_result(result)
+            print(f"\r  {var['key']:>14}: ODG = {odg:>7.3f}" +
+                  (f"  (DI = {di:.3f})" if di is not None else ""))
+
+            all_results.append({
+                "task_id": task["id"],
+                "instrument": task["name"],
+                "pomieszczenie": task["room"],
+                "pozycja": task["pos"],
+                "typ": var["label"],
+                "typ_kod": var["key"],
+                "ODG": round(odg, 4),
+                "DI": round(di, 4) if di is not None else "",
+            })
+
+        except Exception as e:
+            # Fallback: parsuj z wydruku na ekranie
+            print(f"\r  {var['key']:>14}: wynik wydrukowany powyżej (parsowanie: {type(result).__name__})")
+
+            all_results.append({
+                "task_id": task["id"],
+                "instrument": task["name"],
+                "pomieszczenie": task["room"],
+                "pozycja": task["pos"],
+                "typ": var["label"],
+                "typ_kod": var["key"],
+                "ODG": "",
+                "DI": "",
+            })
+
+    print()
+
+# Sprzątanie
+for tmp in tmp_files:
+    try:
+        os.remove(tmp)
+    except:
+        pass
+
+# =====================================================
+# ZAPIS CSV
+# =====================================================
+
+if all_results:
+    fieldnames = list(all_results[0].keys())
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(all_results)
+
+# =====================================================
+# PODSUMOWANIE
+# =====================================================
+
+print("=" * 75)
+print("PODSUMOWANIE (referencja = auralizacja 48 kHz)")
+print("=" * 75)
+print()
+
+by_type = {}
+for row in all_results:
+    key = row["typ_kod"]
+    odg = row["ODG"]
+    if odg == "" or odg is None:
+        continue
+    if key not in by_type:
+        by_type[key] = []
+    by_type[key].append(float(odg))
+
+print(f"{'Typ':<30} {'Śr. ODG':>10} {'Min':>8} {'Max':>8} {'N':>4}")
+print("-" * 65)
+for key in ["aur48_sanity", "aur24", "aur12", "aur8", "aur4"]:
+    if key in by_type:
+        vals = by_type[key]
+        avg = np.mean(vals)
+        label = [v["label"] for v in VARIANTS if v["key"] == key][0]
+        print(f"{label:<30} {avg:>10.3f} {min(vals):>8.3f} {max(vals):>8.3f} {len(vals):>4}")
+
+print()
+print(f"Wyniki zapisane: {OUTPUT_CSV}")
+print()
+print("Skala ODG: 0 = niesłyszalna różnica, -1 = słyszalna,")
+print("           -2 = przeszkadza, -3 = irytuje, -4 = fatalna")
+print()
+print("Oczekiwany ranking: aur48(≈0) > aur24 > aur12 > aur8 > aur4")
