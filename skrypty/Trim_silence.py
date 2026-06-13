@@ -70,6 +70,12 @@ def find_silence_gaps(data, sr):
                     gaps.append((gap_start * win, i * win))
             gap_start = None
 
+    # Handle gap that extends to the very end of the file
+    if gap_start is not None:
+        gap_len = len(is_quiet) - gap_start
+        if gap_len >= min_gap_wins and gap_start * WINDOW_S > 2.0:
+            gaps.append((gap_start * win, len(mono)))
+
     return gaps
 
 

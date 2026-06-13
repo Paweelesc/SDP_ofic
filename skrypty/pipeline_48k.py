@@ -193,9 +193,9 @@ def auralize_stereo(anechoic_mono, ir_stereo):
     Zwraca sygnał stereo (N, 2).
     """
     if ir_stereo.ndim == 1:
-        # IR jest mono — splot mono
-        y = fftconvolve(anechoic_mono, ir_stereo, mode="full")
-        return normalize_signal(y)
+        # IR jest mono — splot mono, duplikuj do stereo
+        y = normalize_signal(fftconvolve(anechoic_mono, ir_stereo, mode="full"))
+        return np.column_stack((y, y))
 
     ir_L = ir_stereo[:, 0]
     ir_R = ir_stereo[:, 1]

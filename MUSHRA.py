@@ -4,12 +4,11 @@ Fix: seek bez restartu strumienia (brak race condition).
 Fix: kompaktowe UI dla 7 kolumn.
 """
 
-import csv, os, random, threading, time
+import csv, os, random, threading
 from dataclasses import dataclass
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
@@ -404,6 +403,8 @@ class MushraApp:
         self.show_test()
 
     def render_task(self):
+        self.player.stop()
+        self._reset_btns()
         t = TASKS[self.task_idx]
         self.prog_lbl.configure(text=f"Zadanie {self.task_idx+1} z {len(TASKS)}")
         self.task_title.configure(text=f'{t["instrument"]} — {t["room"]}')

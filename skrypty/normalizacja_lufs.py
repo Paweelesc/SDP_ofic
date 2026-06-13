@@ -38,7 +38,7 @@ MAX_PEAK_DBFS = -1.0
 FOLDER_KEYWORDS = [
     "auralizowane",
     "auralizacja",
-    "auraliz"
+    "auraliz",
     "referenc",
     "ref",
     "mono",

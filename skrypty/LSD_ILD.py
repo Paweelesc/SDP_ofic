@@ -220,6 +220,9 @@ for task in TASKS:
             continue
 
         deg_data, sr_d = sf.read(deg_path)
+        if sr_d != sr:
+            print(f"  {var['key']:>6}: POMINIĘTO (różne fs: ref={sr}, deg={sr_d})")
+            continue
         if deg_data.ndim == 1:
             deg_L = deg_data
             deg_R = deg_data
